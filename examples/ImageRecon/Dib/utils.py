@@ -48,7 +48,7 @@ def collate_fn(data):
 	new_data = {}
 	for k in data[0].keys():
 		
-		if k in ['points','norms', 'imgs', 'cam_mat', 'cam_pos', 'sdf_points']:
+		if k in ['points','norms', 'images', 'cam_mat', 'cam_pos', 'sdf_points']:
 			new_info = tuple(d[k] for d in data)
 			new_info = torch.stack(new_info, 0)
 		elif k in ['adj']: 
