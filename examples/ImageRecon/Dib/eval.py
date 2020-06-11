@@ -21,12 +21,16 @@ from PIL import Image
 import numpy as np
 
 from torch.utils.data import DataLoader
-from graphics.render.base import Render as Dib_Renderer
-from graphics.utils.utils_perspective import  perspectiveprojectionnp
 
+from kaolin.graphics.dib_renderer.utils import perspectiveprojectionnp
 from utils import preprocess, collate_fn, normalize_adj
 from architectures import Encoder
 import kaolin as kal 
+from kaolin.graphics import DIBRenderer as Dib_Renderer
+from kaolin.datasets import shapenet
+import resource
+rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-expid', type=str, default='Direct', help='Unique experiment identifier.')
@@ -38,16 +42,13 @@ args = parser.parse_args()
 
 
 # Data
-points_set_valid = kal.dataloader.ShapeNet.Points(root ='../../datasets/',categories =args.categories , \
-	download = True, train = False, split = .7, num_points=5000 )
-images_set_valid = kal.dataloader.ShapeNet.Images(root ='../../datasets/',categories =args.categories , \
-	download = True, train = False,  split = .7, views=1, transform= preprocess )
-meshes_set_valid = kal.dataloader.ShapeNet.Meshes(root ='../../datasets/', categories =args.categories , \
-	download = True, train = False,  split = .7)
+points_set_valid = shapenet.ShapeNet_Points(root ='/media/archana/Local/Datasets/ShapeNetCore.v1.zip/ShapeNetCore.v1',cache_dir = '/media/archana/Local/Datasets/ShapeNetCore.v1.zip/cache/', categories =args.categories ,  train = False, split = .7, num_points=5000 )
+images_set_valid = shapenet.ShapeNet_Images(root ='/media/archana/Local/Datasets/ShapeNetRendering', categories =args.categories ,  train = False,  split = .7, views=1, transform= preprocess )
+meshes_set_valid = shapenet.ShapeNet_Meshes(root ='/media/archana/Local/Datasets/ShapeNetCore.v1.zip/ShapeNetCore.v1', categories =args.categories , train = False,  split = .7)
 
-valid_set = kal.dataloader.ShapeNet.Combination([points_set_valid, images_set_valid, meshes_set_valid], root='../../datasets/')
+valid_set = shapenet.ShapeNet_Combination([points_set_valid, images_set_valid, meshes_set_valid])
 dataloader_val = DataLoader(valid_set, batch_size=args.batchsize, shuffle=False, collate_fn = collate_fn,
-	num_workers=8)
+	num_workers=0)
 
 # Model
 mesh = kal.rep.TriangleMesh.from_obj('386.obj', enable_adjacency= True)
@@ -72,16 +73,70 @@ loss_fn = kal.metrics.point.chamfer_distance
 
 model.eval()
 with torch.no_grad():
-	for data in tqdm(dataloader_val): 
+
+	for data in (tqdm(dataloader_val)):
+
+	
 		# data creation
-		tgt_points = data['points'].cuda()
-		inp_images = data['imgs'].cuda()
-		image_gt = inp_images.permute(0,2,3,1)[:,:,:,:3]
-		alhpa_gt = inp_images.permute(0,2,3,1)[:,:,:,3:]
-		cam_mat = data['cam_mat'].cuda()
-		cam_pos = data['cam_pos'].cuda()
-		gt_verts = data['verts']
-		gt_faces = data['faces']
+		
+		"""def print_keys(data, tabs):
+				if isinstance(data, dict):
+					for key, val in data.items():
+						print(""*tabs,end="")
+						print(key)
+						print_keys(val,tabs+1)
+
+
+		total = 0
+		for item in data['data']:
+                        x = list((item['vertices']).size())
+                        print(x)
+                        
+
+		dict = {}
+		def convert(tup,dic):
+			for i, j in tup:
+				dic.setdefault(i,[]).append(j)
+			return dic
+		data = convert(data['data'],dict)
+		data = dict(zip(data['data'][:]))
+		print(type(data['data']))
+		print(type(data['data'][0]))
+		d = {}
+		for k in data['data'][0].keys():
+			d[k] = list(d[k] for d in data['data'])
+
+		d['points']=torch.Tensor(d['points'])	"""
+		
+		
+		
+		tgt_points = torch.cat([item['points'] for item in data['data']]).cuda()
+		#print((tgt_points).size())
+		if(tgt_points.size()!=torch.Size([80000,3])):
+			continue
+		tgt_points = tgt_points.reshape(16,5000,3)
+
+		inp_images = torch.cat([item['images'] for item in data['data']]).cuda()
+		#print((inp_images.size()))
+		if(inp_images.size()!=torch.Size([64,137,137])):
+			continue
+		inp_images = inp_images.reshape(16,4,137,137)
+
+		cam_mat = torch.cat([item['params']['cam_mat'] for item in data['data']]).cuda()
+		#print((cam_mat.size()))
+		if(cam_mat.size()!=torch.Size([48,3])):
+			continue
+		cam_mat = cam_mat.reshape(16,3,3)
+		cam_pos = torch.cat([item['params']['cam_pos'] for item in data['data']]).cuda()
+		#print((cam_pos.size()))
+		if(cam_pos.size()!=torch.Size([48])):
+			continue
+		cam_pos = cam_pos.reshape(16,3)
+		
+		gt_verts = torch.cat([item['vertices'] for item in data['data']])
+		gt_verts = gt_verts.unsqueeze(0)
+		gt_faces = torch.cat([item['faces'] for item in data['data']])
+		gt_faces = gt_faces.unsqueeze(0)
 
 		# inference 
 		delta_verts = model(inp_images)
@@ -94,8 +149,8 @@ with torch.no_grad():
 		pred_verts = initial_verts + delta_verts
 	
 		# render image
-		image_pred, _, _ = renderer.forward(points=[(pred_verts*.57 ), mesh.faces], colors=[colours])
-		
+		image_pred, _, _ = renderer.forward(points=[(pred_verts*.57 ), mesh.faces], colors_bxpx3=colours) 
+		#image_pred, alpha_pred, face_norms = renderer.forward(points=[(pred_verts*.57 ), mesh.faces], colors_bxpx3=colours)
 		# mesh loss
 		
 		for verts, tgt, inp_img, pred_img, gt_v, gt_f in zip(pred_verts, tgt_points, inp_images, image_pred, gt_verts, gt_faces): 	
