@@ -24,12 +24,12 @@ import sys
 from tqdm import tqdm
 
 from utils import preprocess, loss_lap, collate_fn, normalize_adj, loss_flat
-from graphics.render.base import Render as Dib_Renderer
-from graphics.utils.utils_perspective import  perspectiveprojectionnp
+from kaolin.graphics.dib_renderer.utils import perspectiveprojectionnp
 from architectures import Encoder
 
 import kaolin as kal 
-
+from kaolin.graphics import DIBRenderer as Dib_Renderer
+from kaolin.datasets import shapenet
 
 """
 Commandline arguments
@@ -52,22 +52,20 @@ args = parser.parse_args()
 """
 Dataset
 """
-sdf_set = kal.dataloader.ShapeNet.SDF_Points(root ='../../datasets/',categories =args.categories , \
-	download = True, train = True, split = .7, num_points=3000 )
-point_set = kal.dataloader.ShapeNet.Points(root ='../../datasets/',categories =args.categories , \
-	download = True, train = True, split = .7, num_points=3000 )
-images_set = kal.dataloader.ShapeNet.Images(root ='../../datasets/',categories =args.categories , \
-	download = True, train = True,  split = .7, views=23, transform= preprocess )
-train_set = kal.dataloader.ShapeNet.Combination([sdf_set, images_set, point_set], root='../../kaolin/datasets/')
+sdf_set = shapenet.ShapeNet_SDF_Points(root ='/media/archana/Local/Datasets/ShapeNetCore.v1.zip/ShapeNetCore.v1',cache_dir = '/media/archana/Local/Datasets/ShapeNetCore.v1.zip/cache/',categories =args.categories , train = True, split = .7, num_points=3000 )
+point_set = shapenet.ShapeNet_Points(root ='/media/archana/Local/Datasets/ShapeNetCore.v1.zip/ShapeNetCore.v1',cache_dir = '/media/archana/Local/Datasets/ShapeNetCore.v1.zip/cache/',categories =args.categories ,  train = True, split = .7, num_points=3000 )
+images_set = shapenet.ShapeNet_Images(root ='/media/archana/Local/Datasets/ShapeNetRendering',categories =args.categories , train = True,  split = .7, views=23, transform= preprocess )
+train_set = shapenet.ShapeNet_Combination([sdf_set, images_set, point_set])
 
 dataloader_train = DataLoader(train_set, batch_size=args.batchsize, shuffle=True, num_workers=8)
 
 
+sdf_set_valid = shapenet.ShapeNet_SDF_Points(root ='/media/archana/Local/Datasets/ShapeNetCore.v1.zip/ShapeNetCore.v1',cache_dir = '/media/archana/Local/Datasets/ShapeNetCore.v1.zip/cache/',categories =args.categories , train = False, split = .2, num_points=1000 )
+point_set_valid = shapenet.ShapeNet_Points(root ='/media/archana/Local/Datasets/ShapeNetCore.v1.zip/ShapeNetCore.v1',cache_dir = '/media/archana/Local/Datasets/ShapeNetCore.v1.zip/cache/',categories =args.categories ,  train = False, split = .2, num_points=1000 )
+images_set_valid = shapenet.ShapeNet_Images(root ='/media/archana/Local/Datasets/ShapeNetRendering',categories =args.categories , train = False,  split = .2, views=1, transform= preprocess )
 
-
-images_set_valid = kal.dataloader.ShapeNet.Images(root ='../../datasets/',categories =args.categories , \
-	download = True, train = False,  split = .7, views=1, transform= preprocess )
-dataloader_val = DataLoader(images_set_valid, batch_size=args.batchsize, shuffle=False, 
+val_set = shapenet.ShapeNet_Combination([sdf_set_valid, images_set_valid, point_set_valid])
+dataloader_val = DataLoader(val_set, batch_size=args.batchsize, shuffle=False, 
 	num_workers=8)
 
 
@@ -118,16 +116,25 @@ class Engine(object):
 
 		model.train()
 		# Train loop
-		for i, data in enumerate(tqdm(dataloader_train), 0):
+		for i, data in enumerate(tqdm(dataloader_train),0):
 			optimizer.zero_grad()
 			
 			# data creation
-			tgt_points = data['points'].cuda()
-			inp_images = data['imgs'].cuda()
+			"""def print_keys(data, tabs):
+				if isinstance(data, dict):
+					for key, val in data.items():
+						print("\t"*tabs,end="")
+						print(key)
+						print_keys(val,tabs+1)
+
+			print_keys(data,0)"""
+			
+			tgt_points = data['data']['points'].cuda()
+			inp_images = data['data']['images'].cuda()
 			image_gt = inp_images.permute(0,2,3,1)[:,:,:,:3]
 			alhpa_gt = inp_images.permute(0,2,3,1)[:,:,:,3:]
-			cam_mat = data['cam_mat'].cuda()
-			cam_pos = data['cam_pos'].cuda()
+			cam_mat = data['data']['params']['cam_mat'].cuda()
+			cam_pos = data['data']['params']['cam_pos'].cuda()
 
 			# set viewing parameters 
 			renderer.camera_params = [cam_mat, cam_pos, cam_proj]
@@ -137,7 +144,7 @@ class Engine(object):
 			pred_verts = initial_verts + delta_verts
 		
 			# render image
-			image_pred, alpha_pred, face_norms = renderer.forward(points=[(pred_verts*.57), mesh.faces], colors=[colours])
+			image_pred, alpha_pred, face_norms = renderer.forward(points=[(pred_verts*.57), mesh.faces], colors_bxpx3=colours)
 			
 			# colour loss
 			img_loss = ((image_pred - image_gt)**2).mean()
@@ -182,13 +189,13 @@ class Engine(object):
 			loss_epoch = 0.
 
 			# Validation loop
-			for i, data in enumerate(tqdm(dataloader_val), 0):
-
+			for i, data in enumerate(tqdm(dataloader_val)):
+				
 				# data creation
-				inp_images = data['imgs'].cuda()
+				inp_images = data['data']['images'].cuda()
 				image_gt = inp_images.permute(0,2,3,1)
-				cam_mat = data['cam_mat'].cuda()
-				cam_pos = data['cam_pos'].cuda()
+				cam_mat = data['data']['params']['cam_mat'].cuda()
+				cam_pos = data['data']['params']['cam_pos'].cuda()
 
 
 				# set viewing parameters 
@@ -199,7 +206,7 @@ class Engine(object):
 				pred_verts = initial_verts + delta_verts
 			
 				# render image
-				image_pred, alpha_pred, _ = renderer.forward(points=[(pred_verts*.57 ), mesh.faces], colors=[colours])
+				image_pred, alpha_pred, _ = renderer.forward(points=[(pred_verts*.57 ), mesh.faces], colors_bxpx3=colours)
 				
 				full_pred = torch.cat((image_pred, alpha_pred), dim = -1)
 	
